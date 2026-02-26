@@ -1,0 +1,24 @@
+{
+  "documents": [
+    {
+      "id": "doc-001",
+      "title": "Q4 Strategy Review",
+      "content": "This document outlines the key strategic priorities for Q4, including expansion into new markets and improvement of customer retention metrics.",
+      "metadata": {
+        "author": "strategy-team",
+        "created_at": "2026-01-15T09:00:00Z",
+        "tags": ["strategy", "q4", "planning"]
+      }
+    },
+    {
+      "id": "doc-002",
+      "title": "Product Roadmap 2026",
+      "content": "The 2026 product roadmap focuses on three major themes: AI-native workflows, enterprise-grade security, and seamless integrations with existing tools.",
+      "metadata": {
+        "author": "product-team",
+        "created_at": "2026-01-20T10:30:00Z",
+        "tags": ["product", "roadmap", "2026"]
+      }
+    }
+  ]
+}
