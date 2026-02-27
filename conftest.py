@@ -24,5 +24,8 @@ def pytest_collection_modifyitems(
 
     if not services_required:
         for item in items:
-            if "smoke" in item.keywords or "phase0" in item.keywords:
+            if any(
+                mark in item.keywords
+                for mark in ("smoke", "phase0", "phase1", "phase2")
+            ):
                 item.add_marker(skip_no_services)
