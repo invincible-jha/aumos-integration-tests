@@ -1,0 +1,231 @@
+name: Integration Tests
+
+on:
+  pull_request:
+  schedule:
+    - cron: '0 2 * * *'  # 2am UTC nightly
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: 'Test suite to run'
+        required: false
+        default: 'all'
+        type: choice
+        options: ['all', 'smoke', 'phase0', 'phase1', 'phase2', 'contracts', 'chaos', 'performance']
+
+jobs:
+  # -------------------------------------------------------------------------
+  # Smoke tests: run on every PR — no infrastructure required, <1 minute
+  # -------------------------------------------------------------------------
+  smoke:
+    name: Smoke Tests (PR)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -e ".[integration]"
+
+      - name: Run smoke tests
+        run: pytest tests/smoke/ -v -m smoke --tb=short
+        env:
+          AUMOS_SERVICES_RUNNING: "false"
+          AUMOS_USE_TESTCONTAINERS: "false"
+
+  # -------------------------------------------------------------------------
+  # Unit-level phase0 tests: run on every PR — no containers required
+  # -------------------------------------------------------------------------
+  phase0-unit:
+    name: Phase 0 Unit Tests (PR)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -e ".[integration]"
+
+      - name: Run phase0 unit tests (no containers)
+        run: pytest tests/phase0/ -v -m "phase0 and not integration" --tb=short
+        env:
+          AUMOS_USE_TESTCONTAINERS: "false"
+
+  # -------------------------------------------------------------------------
+  # Full integration suite: nightly + manual dispatch — uses Testcontainers
+  # -------------------------------------------------------------------------
+  full-integration:
+    name: Full Integration Suite
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: aumos
+          POSTGRES_PASSWORD: aumos_dev
+          POSTGRES_DB: aumos
+        ports:
+          - "5432:5432"
+        options: >-
+          --health-cmd "pg_isready -U aumos"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+      redis:
+        image: redis:7.2-alpine
+        ports:
+          - "6379:6379"
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -e ".[integration]"
+
+      - name: Determine suite to run
+        id: suite
+        run: |
+          SUITE="${{ github.event.inputs.suite || 'all' }}"
+          if [ "$SUITE" = "all" ]; then
+            echo "markers=phase0 or phase1 or phase2" >> $GITHUB_OUTPUT
+          else
+            echo "markers=$SUITE" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run phase0 integration tests (Testcontainers)
+        if: github.event.inputs.suite == '' || github.event.inputs.suite == 'all' || github.event.inputs.suite == 'phase0'
+        run: pytest tests/phase0/ tests/database/ -v -m "phase0 or integration" --tb=short -x
+        env:
+          AUMOS_USE_TESTCONTAINERS: "true"
+          AUMOS_DATABASE__URL: "postgresql+asyncpg://aumos:aumos_dev@localhost:5432/aumos"
+          AUMOS_REDIS__URL: "redis://localhost:6379/0"
+
+      - name: Run phase1 integration tests
+        if: github.event.inputs.suite == '' || github.event.inputs.suite == 'all' || github.event.inputs.suite == 'phase1'
+        run: pytest tests/phase1/ -v -m phase1 --tb=short
+        env:
+          AUMOS_USE_TESTCONTAINERS: "true"
+          AUMOS_SERVICES_RUNNING: "true"
+          AUMOS_DATABASE__URL: "postgresql+asyncpg://aumos:aumos_dev@localhost:5432/aumos"
+          AUMOS_REDIS__URL: "redis://localhost:6379/0"
+
+      - name: Run phase2 integration tests
+        if: github.event.inputs.suite == '' || github.event.inputs.suite == 'all' || github.event.inputs.suite == 'phase2'
+        run: pytest tests/phase2/ -v -m phase2 --tb=short
+        env:
+          AUMOS_USE_TESTCONTAINERS: "true"
+          AUMOS_SERVICES_RUNNING: "true"
+          AUMOS_DATABASE__URL: "postgresql+asyncpg://aumos:aumos_dev@localhost:5432/aumos"
+          AUMOS_REDIS__URL: "redis://localhost:6379/0"
+
+  # -------------------------------------------------------------------------
+  # Contract tests: nightly — requires pact-python
+  # -------------------------------------------------------------------------
+  contract-tests:
+    name: Pact Contract Tests
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.event.inputs.suite == 'contracts')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies with contract extras
+        run: pip install -e ".[contracts]"
+
+      - name: Run contract tests
+        run: pytest tests/contracts/ -v -m contract --tb=short
+        env:
+          AUMOS_USE_TESTCONTAINERS: "false"
+
+      - name: Upload Pact contracts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pact-contracts
+          path: pacts/
+          retention-days: 30
+
+  # -------------------------------------------------------------------------
+  # Chaos tests: nightly — requires Docker socket access
+  # -------------------------------------------------------------------------
+  chaos-tests:
+    name: Chaos Tests
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.event.inputs.suite == 'chaos')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -e ".[integration]"
+
+      - name: Run chaos tests
+        run: pytest tests/chaos/ -v -m chaos --tb=short
+        env:
+          AUMOS_USE_TESTCONTAINERS: "true"
+
+  # -------------------------------------------------------------------------
+  # Performance baselines: nightly — requires Testcontainers
+  # -------------------------------------------------------------------------
+  performance-tests:
+    name: Performance Baselines
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.event.inputs.suite == 'performance')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies with performance extras
+        run: pip install -e ".[integration,performance]"
+
+      - name: Run performance baseline tests
+        run: pytest tests/performance/ -v -m performance --tb=short --benchmark-min-rounds=5
+        env:
+          AUMOS_USE_TESTCONTAINERS: "true"
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: benchmark-results
+          path: .benchmarks/
+          retention-days: 90
